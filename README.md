@@ -49,10 +49,6 @@ build:
 
 Install
 ```
-cd /root
-git clone https://github.com/ambrop72/badvpn.git
-cd badvpn
-
 curl -fsSL https://raw.githubusercontent.com/MasterHide/badvpn/master/badvpn_install.sh | sudo bash
 
 
@@ -61,7 +57,6 @@ RO uninstalle
 
 ```
 curl -fsSL https://raw.githubusercontent.com/MasterHide/badvpn/master/badvpn_uninstall.sh | sudo bash
-
 
 ```
 
