@@ -422,6 +422,8 @@ case "${1:-}" in
   restart) restart_service; show_ports ;;
   edit) edit_config ;;
   set-addr) set_listen_addr ;;
+  ssl) ssl_cert_issue ;;
+  global) install_badvpn_menu_command ;;
   "" ) menu ;;
   * ) echo "Usage: $0 [install|status|logs|logs-f|ports|start|stop|restart|edit|set-addr]"; exit 1 ;;
 esac
