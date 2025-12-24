@@ -28,6 +28,10 @@ need_root() { [[ "${EUID:-$(id -u)}" -eq 0 ]] || die "Run as root (sudo)."; }
 
 have_cmd() { command -v "$1" >/dev/null 2>&1; }
 
+require_systemd() {
+  have_cmd systemctl || die "systemctl not found. This script requires systemd."
+}
+
 ensure_tools() {
   if ! have_cmd ss; then
     apt-get update -y
@@ -43,14 +47,19 @@ install_deps() {
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -y
   apt-get install -y --no-install-recommends \
-    ca-certificates git cmake build-essential pkg-config iproute2 nano
+    ca-certificates git cmake build-essential pkg-config iproute2 nano curl socat
 }
 
 clone_or_update() {
   log "Preparing source: ${SRC_DIR}"
   if [[ -d "${SRC_DIR}/.git" ]]; then
     git -C "${SRC_DIR}" fetch --all --prune
-    git -C "${SRC_DIR}" reset --hard origin/master || git -C "${SRC_DIR}" reset --hard origin/main
+    # Prefer origin/master, fallback to origin/main
+    if git -C "${SRC_DIR}" show-ref --verify --quiet refs/remotes/origin/master; then
+      git -C "${SRC_DIR}" reset --hard origin/master
+    else
+      git -C "${SRC_DIR}" reset --hard origin/main
+    fi
   else
     rm -rf "${SRC_DIR}"
     git clone "${REPO_URL}" "${SRC_DIR}"
@@ -100,6 +109,7 @@ EOF
 }
 
 write_service() {
+  require_systemd
   log "Creating systemd service: ${SERVICE_PATH}"
   cat > "${SERVICE_PATH}" <<'EOF'
 [Unit]
@@ -124,12 +134,14 @@ EOF
 }
 
 enable_service() {
+  require_systemd
   log "Enabling & starting ${SERVICE_NAME}"
   systemctl enable --now "${SERVICE_NAME}"
 }
 
 # ========= Ops / Menu actions =========
 show_status() {
+  require_systemd
   echo
   systemctl status "${SERVICE_NAME}" --no-pager -l || true
 }
@@ -138,9 +150,14 @@ show_ports() {
   echo
   echo "Listening UDP sockets for badvpn / LISTEN_ADDR from config:"
   if [[ -f "${ENV_FILE}" ]]; then
+    # safe source under set -u
+    set +u
     # shellcheck disable=SC1090
     source "${ENV_FILE}" || true
-    echo "Configured LISTEN_ADDR=${LISTEN_ADDR:-"(not set)"}"
+    set -u
+
+    echo "Configured LISTEN_ADDR=${LISTEN_ADDR:-not_set}"
+
     if [[ -n "${LISTEN_ADDR:-}" ]]; then
       local port="${LISTEN_ADDR##*:}"
       ss -u -lpn | grep -E ":${port}\b|badvpn" || true
@@ -154,24 +171,28 @@ show_ports() {
 }
 
 show_logs() {
+  require_systemd
   echo
   journalctl -u "${SERVICE_NAME}" --no-pager -n 120 || true
 }
 
 follow_logs() {
+  require_systemd
   echo
   journalctl -u "${SERVICE_NAME}" -f
 }
 
-start_service() { systemctl start "${SERVICE_NAME}"; }
-stop_service() { systemctl stop "${SERVICE_NAME}"; }
-restart_service() { systemctl restart "${SERVICE_NAME}"; }
-enable_on_boot() { systemctl enable "${SERVICE_NAME}"; }
-disable_on_boot() { systemctl disable "${SERVICE_NAME}"; }
+start_service() { require_systemd; systemctl start "${SERVICE_NAME}"; }
+stop_service() { require_systemd; systemctl stop "${SERVICE_NAME}"; }
+restart_service() { require_systemd; systemctl restart "${SERVICE_NAME}"; }
+enable_on_boot() { require_systemd; systemctl enable "${SERVICE_NAME}"; }
+disable_on_boot() { require_systemd; systemctl disable "${SERVICE_NAME}"; }
 
 edit_config() {
   ensure_tools
+  [[ -f "${ENV_FILE}" ]] || write_env_file_if_missing
   nano "${ENV_FILE}"
+  require_systemd
   systemctl daemon-reload
   systemctl restart "${SERVICE_NAME}" || true
   show_ports
@@ -183,6 +204,7 @@ set_listen_addr() {
   read -r -p "Enter new LISTEN_ADDR (example: 127.0.0.1:7300): " newaddr
   [[ -n "${newaddr}" ]] || die "LISTEN_ADDR cannot be empty"
   sed -i -E "s|^LISTEN_ADDR=.*|LISTEN_ADDR=\"${newaddr}\"|g" "${ENV_FILE}"
+  require_systemd
   systemctl daemon-reload
   systemctl restart "${SERVICE_NAME}" || true
   show_ports
@@ -205,14 +227,12 @@ install_flow() {
   show_ports
 }
 
-
 # ========= Simple logger =========
 LOGI() { echo -e "[INFO] $*"; }
 LOGE() { echo -e "[ERROR] $*" >&2; }
 LOGD() { echo -e "[DEBUG] $*"; }
 
 detect_release() {
-  # Debian/Ubuntu focus (as you asked)
   if [[ -r /etc/os-release ]]; then
     # shellcheck disable=SC1091
     . /etc/os-release
@@ -230,22 +250,28 @@ install_acme() {
   LOGI "Installing acme.sh..."
   apt-get update -y
   apt-get install -y --no-install-recommends curl ca-certificates
-  # Install to /root/.acme.sh by default when running as root
   curl -fsSL https://get.acme.sh | sh
 }
 
 install_badvpn_menu_command() {
-  # Creates a global command "badvpn" -> opens this script's menu
   local target_script="/usr/local/sbin/badvpn-manager"
   LOGI "Installing global command: badvpn"
 
-  # Copy current script to a stable path
   install -m 0755 "$0" "${target_script}"
 
-  # Create wrapper in /usr/local/bin
-  cat >/usr/local/bin/badvpn <<EOF
+  # Wrapper: use sudo only if not root (and if sudo exists)
+  cat >/usr/local/bin/badvpn <<'EOF'
 #!/usr/bin/env bash
-exec sudo ${target_script}
+if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+  if command -v sudo >/dev/null 2>&1; then
+    exec sudo /usr/local/sbin/badvpn-manager
+  else
+    echo "sudo not found. Run as root: su -c /usr/local/sbin/badvpn-manager" >&2
+    exit 1
+  fi
+else
+  exec /usr/local/sbin/badvpn-manager
+fi
 EOF
   chmod +x /usr/local/bin/badvpn
 
@@ -253,8 +279,6 @@ EOF
 }
 
 ssl_cert_issue() {
-  # This function issues a cert and configures x-ui with it.
-  # Requirements: domain must point to this VPS; port 80 must be reachable.
   local release
   release="$(detect_release)"
 
@@ -268,17 +292,15 @@ ssl_cert_issue() {
   existing_webBasePath=$(/usr/local/x-ui/x-ui setting -show true | awk '/webBasePath:/ {print $2; exit}')
   existing_port=$(/usr/local/x-ui/x-ui setting -show true | awk '/port:/ {print $2; exit}')
 
-  # check for acme.sh first
   if [[ ! -x /root/.acme.sh/acme.sh ]]; then
     LOGI "acme.sh not found. Installing..."
     install_acme || { LOGE "install acme.sh failed"; return 1; }
   fi
 
-  # install socat
   case "${release}" in
     ubuntu|debian)
       apt-get update -y
-      apt-get install -y --no-install-recommends socat
+      apt-get install -y --no-install-recommends socat iproute2
       ;;
     *)
       LOGE "Unsupported OS for this SSL helper (${release}). Debian/Ubuntu only."
@@ -286,63 +308,60 @@ ssl_cert_issue() {
       ;;
   esac
 
-  # Get domain
+  # Pre-check: port 80 must be free for standalone
+  if ss -tulpn | grep -q ':80 '; then
+    LOGE "Port 80 is currently in use. Standalone ACME needs port 80."
+    ss -tulpn | grep ':80 ' || true
+    LOGE "Stop the service using port 80 (nginx/apache/caddy) then retry."
+    return 1
+  fi
+
   local domain=""
   read -r -p "Please enter your domain name (A/AAAA must point to this VPS): " domain
   [[ -n "${domain}" ]] || { LOGE "Domain cannot be empty"; return 1; }
   LOGI "Domain: ${domain}"
 
-  # Check existing cert in acme list (best-effort)
-  local currentCert
-  currentCert=$(/root/.acme.sh/acme.sh --list 2>/dev/null | awk 'NR>1 {print $1}' | tail -n 1 || true)
-  if [[ "${currentCert}" == "${domain}" ]]; then
+  # Only block if exact domain exists in list (more accurate than tail -1)
+  if /root/.acme.sh/acme.sh --list 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "${domain}"; then
     LOGE "A certificate already exists for ${domain} in acme.sh."
     /root/.acme.sh/acme.sh --list || true
     return 1
   fi
 
-  # Cert path
   local certPath="/root/cert/${domain}"
   rm -rf "${certPath}"
   mkdir -p "${certPath}"
 
   LOGI "Issuing certificate using Let's Encrypt (standalone mode)..."
-  LOGI "NOTE: Port 80 must be free and accessible from the internet."
+  LOGI "NOTE: Port 80 must be reachable from the internet."
 
   /root/.acme.sh/acme.sh --set-default-ca --server letsencrypt
 
-  # standalone uses port 80; if another service is using it, issuance fails.
   /root/.acme.sh/acme.sh --issue --force --standalone -d "${domain}" \
     --fullchain-file "${certPath}/fullchain.pem" \
-    --key-file "${certPath}/privkey.pem"
-
-  if [[ $? -ne 0 ]]; then
-    LOGE "Issuing certificate failed. Common causes:"
-    LOGE " - DNS not pointing to this VPS"
-    LOGE " - Port 80 blocked by firewall/provider"
-    LOGE " - Another service is using port 80"
-    rm -rf "/root/.acme.sh/${domain}" || true
-    return 1
-  fi
+    --key-file "${certPath}/privkey.pem" || {
+      LOGE "Issuing certificate failed. Common causes:"
+      LOGE " - DNS not pointing to this VPS"
+      LOGE " - Port 80 blocked by firewall/provider"
+      LOGE " - Another service is using port 80"
+      rm -rf "/root/.acme.sh/${domain}" || true
+      return 1
+    }
 
   LOGI "Installing certificate (acme.sh installcert)..."
   /root/.acme.sh/acme.sh --installcert -d "${domain}" \
     --key-file "${certPath}/privkey.pem" \
-    --fullchain-file "${certPath}/fullchain.pem"
+    --fullchain-file "${certPath}/fullchain.pem" || {
+      LOGE "Installing certificate failed."
+      rm -rf "/root/.acme.sh/${domain}" || true
+      return 1
+    }
 
-  if [[ $? -ne 0 ]]; then
-    LOGE "Installing certificate failed."
-    rm -rf "/root/.acme.sh/${domain}" || true
-    return 1
-  fi
-
-  LOGI "Enabling auto-upgrade for acme.sh (auto renew handled by acme.sh cron)..."
   /root/.acme.sh/acme.sh --upgrade --auto-upgrade || true
 
   chmod 755 "${certPath}"/* || true
   ls -lah "${certPath}" || true
 
-  # Set cert paths for x-ui panel
   local webCertFile="${certPath}/fullchain.pem"
   local webKeyFile="${certPath}/privkey.pem"
 
@@ -355,7 +374,6 @@ ssl_cert_issue() {
     systemctl restart x-ui || true
     LOGI "x-ui restarted."
 
-    # show access URL (best-effort)
     existing_webBasePath="${existing_webBasePath:-/}"
     existing_port="${existing_port:-443}"
     echo
@@ -365,7 +383,6 @@ ssl_cert_issue() {
     return 1
   fi
 }
-
 
 menu() {
   need_root
@@ -410,7 +427,6 @@ menu() {
 }
 
 # ========= Entry =========
-# If run with args, do non-interactive actions; otherwise open menu.
 case "${1:-}" in
   install) install_flow ;;
   status) show_status ;;
@@ -425,5 +441,5 @@ case "${1:-}" in
   ssl) ssl_cert_issue ;;
   global) install_badvpn_menu_command ;;
   "" ) menu ;;
-  * ) echo "Usage: $0 [install|status|logs|logs-f|ports|start|stop|restart|edit|set-addr]"; exit 1 ;;
+  * ) echo "Usage: $0 [install|status|logs|logs-f|ports|start|stop|restart|edit|set-addr|ssl|global]"; exit 1 ;;
 esac
