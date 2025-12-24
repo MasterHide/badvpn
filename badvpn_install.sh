@@ -401,6 +401,8 @@ menu() {
       8) restart_service; show_ports ;;
       9) edit_config ;;
       10) set_listen_addr ;;
+      11) ssl_cert_issue ;;
+      12) install_badvpn_menu_command ;;
       0) exit 0 ;;
       *) echo "Invalid choice." ;;
     esac
