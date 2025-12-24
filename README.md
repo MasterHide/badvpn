@@ -47,12 +47,20 @@ NCD only works on Linux. Tun2socks works on Linux and Windows. The P2P VPN works
 The build system is based on CMake. On Linux, the following commands can be used to
 build:
 
+Install
 ```
-cd <badvpn-source-dir>
-mkdir build
-cd build
-cmake .. -DCMAKE_INSTALL_PREFIX=<install-dir>
-make install
+cd /root
+git clone https://github.com/ambrop72/badvpn.git
+cd badvpn
+
+sudo ./badvpn_install.sh
+
+```
+RO uninstalle
+
+```
+sudo ./badvpn_uninstall.sh
+
 ```
 
 If you only need tun2socks or udpgw, then add the following arguments to the `cmake`
