@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # ========= Config =========
-REPO_URL="https://github.com/ambrop72/badvpn.git"
+REPO_URL="https://github.com/MasterHide/badvpn.git"
 SRC_DIR="/root/badvpn"
 BUILD_DIR="${SRC_DIR}/badvpn-build"
 
