@@ -201,7 +201,7 @@ edit_config() {
 set_listen_addr() {
   ensure_tools
   [[ -f "${ENV_FILE}" ]] || write_env_file_if_missing
-  read -r -p "Enter new LISTEN_ADDR (example: 127.0.0.1:7300): " newaddr
+  read -r -p "Enter new LISTEN_ADDR (example: 127.0.0.1:7300): " newaddr < /dev/tty
   [[ -n "${newaddr}" ]] || die "LISTEN_ADDR cannot be empty"
   sed -i -E "s|^LISTEN_ADDR=.*|LISTEN_ADDR=\"${newaddr}\"|g" "${ENV_FILE}"
   require_systemd
@@ -317,7 +317,7 @@ ssl_cert_issue() {
   fi
 
   local domain=""
-  read -r -p "Please enter your domain name (A/AAAA must point to this VPS): " domain
+ read -r -p "Please enter your domain name (A/AAAA must point to this VPS): " domain < /dev/tty
   [[ -n "${domain}" ]] || { LOGE "Domain cannot be empty"; return 1; }
   LOGI "Domain: ${domain}"
 
@@ -388,6 +388,12 @@ menu() {
   need_root
   ensure_tools
 
+  # Use the controlling terminal for input (fixes curl|bash, panel shells, etc.)
+  local TTY_IN="/dev/tty"
+  if [[ ! -r "${TTY_IN}" ]]; then
+    die "No TTY available for interactive menu. Run: sudo bash $0 (not via pipe)."
+  fi
+
   while true; do
     echo
     echo "=========== BadVPN Manager ==========="
@@ -405,7 +411,13 @@ menu() {
     echo "12) Install global menu command: badvpn"
     echo "0) Exit"
     echo "======================================"
-    read -r -p "Choose: " choice
+
+    # Read from TTY so options work even if stdin is not interactive
+    if ! read -r -p "Choose: " choice < "${TTY_IN}"; then
+      echo
+      echo "Input closed. Exiting."
+      exit 0
+    fi
 
     case "${choice}" in
       1) install_flow ;;
@@ -426,20 +438,3 @@ menu() {
   done
 }
 
-# ========= Entry =========
-case "${1:-}" in
-  install) install_flow ;;
-  status) show_status ;;
-  logs) show_logs ;;
-  logs-f) follow_logs ;;
-  ports) show_ports ;;
-  start) start_service; show_ports ;;
-  stop) stop_service; show_status ;;
-  restart) restart_service; show_ports ;;
-  edit) edit_config ;;
-  set-addr) set_listen_addr ;;
-  ssl) ssl_cert_issue ;;
-  global) install_badvpn_menu_command ;;
-  "" ) menu ;;
-  * ) echo "Usage: $0 [install|status|logs|logs-f|ports|start|stop|restart|edit|set-addr|ssl|global]"; exit 1 ;;
-esac
