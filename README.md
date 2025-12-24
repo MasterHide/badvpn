@@ -53,13 +53,15 @@ cd /root
 git clone https://github.com/ambrop72/badvpn.git
 cd badvpn
 
-sudo ./badvpn_install.sh
+curl -fsSL https://raw.githubusercontent.com/MasterHide/badvpn/master/badvpn_install.sh | sudo bash
+
 
 ```
 RO uninstalle
 
 ```
-sudo ./badvpn_uninstall.sh
+curl -fsSL https://raw.githubusercontent.com/MasterHide/badvpn/master/badvpn_uninstall.sh | sudo bash
+
 
 ```
 
