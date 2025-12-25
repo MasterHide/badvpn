@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+trap 'echo -e "\n[badvpn] ERROR: Command failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+
 # ========= Config =========
 REPO_URL="https://github.com/MasterHide/badvpn.git"
 SRC_DIR="/root/badvpn"
@@ -52,6 +54,17 @@ install_deps() {
 
 clone_or_update() {
   log "Preparing source: ${SRC_DIR}"
+
+  # If directory exists but is not a git repo, don't delete it blindly
+  if [[ -d "${SRC_DIR}" && ! -d "${SRC_DIR}/.git" ]]; then
+    # If it's empty, we can safely remove it
+    if [[ -z "$(ls -A "${SRC_DIR}" 2>/dev/null || true)" ]]; then
+      rm -rf "${SRC_DIR}"
+    else
+      die "${SRC_DIR} exists but is not a git repo. Move/delete it, then rerun."
+    fi
+  fi
+
   if [[ -d "${SRC_DIR}/.git" ]]; then
     git -C "${SRC_DIR}" fetch --all --prune
     # Prefer origin/master, fallback to origin/main
@@ -61,16 +74,16 @@ clone_or_update() {
       git -C "${SRC_DIR}" reset --hard origin/main
     fi
   else
-    rm -rf "${SRC_DIR}"
     git clone "${REPO_URL}" "${SRC_DIR}"
   fi
+
   [[ -f "${SRC_DIR}/CMakeLists.txt" ]] || die "CMakeLists.txt missing in ${SRC_DIR}"
 }
 
 build_all() {
   log "Building (tun2socks + udpgw)"
   mkdir -p "${BUILD_DIR}"
-  cd "${BUILD_DIR}"
+  cd "${BUILD_DIR}" || die "Failed to cd into ${BUILD_DIR}"
 
   cmake .. \
     -DBUILD_NOTHING_BY_DEFAULT=1 \
@@ -259,7 +272,6 @@ install_badvpn_menu_command() {
 
   install -m 0755 "$0" "${target_script}"
 
-  # Wrapper: use sudo only if not root (and if sudo exists)
   cat >/usr/local/bin/badvpn <<'EOF'
 #!/usr/bin/env bash
 if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
@@ -317,11 +329,10 @@ ssl_cert_issue() {
   fi
 
   local domain=""
- read -r -p "Please enter your domain name (A/AAAA must point to this VPS): " domain < /dev/tty
+  read -r -p "Please enter your domain name (A/AAAA must point to this VPS): " domain < /dev/tty
   [[ -n "${domain}" ]] || { LOGE "Domain cannot be empty"; return 1; }
   LOGI "Domain: ${domain}"
 
-  # Only block if exact domain exists in list (more accurate than tail -1)
   if /root/.acme.sh/acme.sh --list 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "${domain}"; then
     LOGE "A certificate already exists for ${domain} in acme.sh."
     /root/.acme.sh/acme.sh --list || true
@@ -388,12 +399,12 @@ menu() {
   need_root
   ensure_tools
 
-  # Use the controlling terminal for input (fixes curl|bash, panel shells, etc.)
   local TTY_IN="/dev/tty"
   if [[ ! -r "${TTY_IN}" ]]; then
     die "No TTY available for interactive menu. Run: sudo bash $0 (not via pipe)."
   fi
 
+  local choice=""
   while true; do
     echo
     echo "=========== BadVPN Manager ==========="
@@ -412,7 +423,6 @@ menu() {
     echo "0) Exit"
     echo "======================================"
 
-    # Read from TTY so options work even if stdin is not interactive
     if ! read -r -p "Choose: " choice < "${TTY_IN}"; then
       echo
       echo "Input closed. Exiting."
@@ -438,3 +448,20 @@ menu() {
   done
 }
 
+# ========= Entry =========
+case "${1:-}" in
+  install) install_flow ;;
+  status) show_status ;;
+  logs) show_logs ;;
+  logs-f) follow_logs ;;
+  ports) show_ports ;;
+  start) start_service; show_ports ;;
+  stop) stop_service; show_status ;;
+  restart) restart_service; show_ports ;;
+  edit) edit_config ;;
+  set-addr) set_listen_addr ;;
+  ssl) ssl_cert_issue ;;
+  global) install_badvpn_menu_command ;;
+  "" ) menu ;;
+  * ) echo "Usage: $0 [install|status|logs|logs-f|ports|start|stop|restart|edit|set-addr|ssl|global]"; exit 1 ;;
+esac
